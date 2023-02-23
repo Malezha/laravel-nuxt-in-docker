@@ -1,0 +1,120 @@
+version: '3.8'
+
+volumes:
+  mysql-data:
+  redis-data:
+
+services:
+  app: &app
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+      args:
+        PHP_VERSION: 8.2
+        APP_UID: ${APP_UID:-10001}
+        APP_GID: ${APP_GID:-10001}
+    environment:
+      PS1: '\[\033[1;32m\]\[\033[1;36m\][\u@\h] \[\033[1;34m\]\w\[\033[0;35m\] \[\033[1;36m\]# \[\033[0m\]'
+      HOME: /tmp
+      PHP_IDE_CONFIG: ${PHP_IDE_CONFIG:-serverName=local}
+      DB_HOST: mysql
+      DB_DATABASE: ${MYSQL_DATABASE:-laravel}
+      DB_USERNAME: ${MYSQL_USER:-laravel}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-laravel}
+      CACHE_DRIVER: redis
+      QUEUE_CONNECTION: redis
+      SESSION_DRIVER: redis
+      REDIS_HOST: redis
+    volumes:
+      - ./api:/app:rw
+      - ./docker/php/custom-php.ini:/usr/local/etc/php/conf.d/custom-php.ini:ro
+      - ./docker/php/custom-fpm.conf:/usr/local/etc/php-fpm.d/custom-fpm.conf:ro
+      - ./docker/php/xdebug.ini:/usr/local/etc/php/conf.d/xdebug.ini:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  api:
+    <<: *app
+    command: php-fpm
+    ports:
+      - '9000/tcp'
+    healthcheck:
+      test: php-fpm-healthcheck
+      interval: 2s
+      timeout: 2s
+
+  queue:
+    <<: *app
+    command: php /app/artisan queue:work --memory=256 --sleep=1
+
+  cron:
+    <<: *app
+    command: supercronic /etc/supercronic/laravel # it runs artisan schedule:run
+
+  mysql:
+    image: mysql:8
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql:rw
+    ports:
+      - '${MYSQL_GLOBAL_PORT}:3306/tcp'
+    healthcheck:
+      test: mysqladmin ping -h mysql -u root -ppassword
+      interval: 2s
+      timeout: 5s
+      start_period: 5s
+      retries: 20
+
+  redis:
+    image: redis:alpine
+    volumes:
+      - redis-data:/data:rw
+    ports:
+      - '6379/tcp'
+    healthcheck:
+      test: [ 'CMD', 'redis-cli', 'ping' ]
+      interval: 500ms
+      timeout: 1s
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/node/Dockerfile
+      args:
+        NODE_VERSION: 18
+        APP_UID: ${APP_UID:-10001}
+        APP_GID: ${APP_GID:-10001}
+    ports:
+      - '3000/tcp'
+    volumes:
+      - ./web:/app:rw
+    command: npm run dev
+    healthcheck:
+      test: [ 'CMD', 'curl', 'http://web:3000' ]
+      interval: 2s
+      timeout: 5s
+      start_period: 5s
+      retries: 20
+
+  nginx:
+    build:
+      context: .
+      dockerfile: docker/nginx/Dockerfile
+      args:
+        NGINX_VERSION: stable
+    ports:
+      - '80:80/tcp'
+      - '443:443/tcp'
+      - '8000:8000/tcp'
+      - '8443:8443/tcp'
+    volumes:
+      - ./api/public:/app/public:ro
+    depends_on:
+      api: { condition: service_healthy }
+      web: { condition: service_healthy }
